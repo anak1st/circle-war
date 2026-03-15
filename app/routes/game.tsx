@@ -15,6 +15,7 @@ export function meta({}: Route.MetaArgs) {
 const WORLD_SIZE = 5000;    // 游戏地图的总宽度和高度
 const FOOD_COUNT = 1000;    // 地图上同时存在的最大食物数量
 const FOOD_RADIUS = 5;      // 食物点的基础半径
+const INITIAL_AI_COUNT = 10; // 初始 AI 敌人数量
 const COLORS = ["#ff4757", "#2ed573", "#1e90ff", "#ffa502", "#eccc68", "#70a1ff", "#7bed9f"]; // 随机颜色库
 
 /**
@@ -62,7 +63,7 @@ class Circle {
     if (this.name) {
       ctx.fillStyle = "white";
       // 根据半径动态调整字体大小
-      ctx.font = `${Math.max(12, this.radius / 2)}px Arial`;
+      ctx.font = `${Math.max(10, this.radius / 2.5)}px Arial`;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(this.name, this.x - offsetX, this.y - offsetY);
@@ -78,19 +79,25 @@ export default function Game() {
   // Canvas DOM 引用
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
+  // HUD 元素引用，用于直接操作 DOM 更新内容，避免 React 重绘开销
+  const massRef = useRef<HTMLSpanElement>(null);
+  const debugRef = useRef<HTMLDivElement>(null);
+  
   // 记录按键状态，使用 Ref 避免触发 React 组件重绘
   const keysRef = useRef<{ [key: string]: boolean }>({
     w: false, a: false, s: false, d: false,
   });
 
-  // 游戏核心状态：包括玩家实例、食物列表和相机位置
+  // 游戏核心状态：包括玩家实例、食物列表、AI 列表和相机位置
   const gameStateRef = useRef<{
     player: Circle;
     foods: Circle[];
+    ais: Circle[];
     camera: { x: number; y: number };
   }>({
     player: new Circle(WORLD_SIZE / 2, WORLD_SIZE / 2, 30, "#3b82f6", "Player"),
     foods: [],
+    ais: [],
     camera: { x: 0, y: 0 },
   });
 
@@ -102,6 +109,24 @@ export default function Game() {
     if (!ctx) return;
 
     let animationFrameId: number;
+
+    /**
+     * 生成初始 AI 敌人
+     */
+    const spawnAIs = () => {
+      const { ais } = gameStateRef.current;
+      while (ais.length < INITIAL_AI_COUNT) {
+        ais.push(
+          new Circle(
+            Math.random() * WORLD_SIZE,
+            Math.random() * WORLD_SIZE,
+            20 + Math.random() * 30,
+            COLORS[Math.floor(Math.random() * COLORS.length)],
+            `AI-${Math.floor(Math.random() * 1000)}`
+          )
+        );
+      }
+    };
 
     /**
      * 补充地图上的食物点
@@ -121,8 +146,9 @@ export default function Game() {
       }
     };
 
-    // 初始化食物
+    // 初始化食物和 AI
     spawnFood();
+    spawnAIs();
 
     /**
      * 处理窗口大小变化，确保 Canvas 铺满屏幕
@@ -156,7 +182,7 @@ export default function Game() {
       const { player, foods } = gameStateRef.current;
       const keys = keysRef.current;
       
-      // 1. 计算移动速度：球体越重（半径越大），速度越慢
+      // 1. 计算玩家移动速度：球体越重（半径越大），速度越慢
       const baseSpeed = 5;
       const speed = baseSpeed * Math.pow(30 / player.radius, 0.5);
 
@@ -185,14 +211,12 @@ export default function Game() {
       // 4. 碰撞检测：检查玩家是否碰到了食物
       for (let i = foods.length - 1; i >= 0; i--) {
         const food = foods[i];
-        // 使用勾股定理计算圆心距
         const distSq = Math.pow(player.x - food.x, 2) + Math.pow(player.y - food.y, 2);
         const minDist = player.radius + food.radius;
 
         if (distSq < Math.pow(minDist, 2)) {
           // 吞噬逻辑：按照面积增加的方式计算新半径
           player.radius = Math.sqrt(Math.pow(player.radius, 2) + Math.pow(food.radius, 2));
-          // 从数组中移除被吃掉的食物
           foods.splice(i, 1);
         }
       }
@@ -204,14 +228,39 @@ export default function Game() {
     };
 
     /**
+     * 更新 HUD 面板文字
+     * 直接修改 DOM 元素的 textContent 或 innerHTML 以获取最高性能
+     */
+    const updateHUD = () => {
+      const { player, foods, ais } = gameStateRef.current;
+      
+      // 更新质量显示
+      if (massRef.current) {
+        massRef.current.textContent = `Mass: ${Math.floor(player.radius)}`;
+      }
+
+      // 更新 Debug 信息显示
+      if (debugRef.current) {
+        const maxAIRadius = ais.length > 0 ? Math.max(...ais.map(a => a.radius)) : 0;
+        debugRef.current.innerHTML = `
+          <div>Food: ${foods.length}</div>
+          <div>AI Count: ${ais.length}</div>
+          <div>Max AI Mass: ${Math.floor(maxAIRadius)}</div>
+        `;
+      }
+    };
+
+    /**
      * 每帧画面渲染
      * 负责清屏、计算相机偏移并绘制所有可见对象
      */
     const render = () => {
       // 先运行逻辑更新
       update();
+      // 更新 HUD (Debug 信息)
+      updateHUD();
 
-      const { player, foods, camera } = gameStateRef.current;
+      const { player, foods, ais, camera } = gameStateRef.current;
 
       // 1. 更新相机：使相机中心始终跟随玩家
       camera.x = player.x - canvas.width / 2;
@@ -257,7 +306,19 @@ export default function Game() {
         }
       });
 
-      // 6. 绘制玩家
+      // 6. 绘制 AI 敌人
+      ais.forEach((ai) => {
+        if (
+          ai.x > camera.x - ai.radius &&
+          ai.x < camera.x + canvas.width + ai.radius &&
+          ai.y > camera.y - ai.radius &&
+          ai.y < camera.y + canvas.height + ai.radius
+        ) {
+          ai.draw(ctx, camera.x, camera.y);
+        }
+      });
+
+      // 7. 绘制玩家
       player.draw(ctx, camera.x, camera.y);
 
       // 循环调用
@@ -281,20 +342,31 @@ export default function Game() {
   }, []);
 
   return (
-    <main className="fixed inset-0 overflow-hidden bg-gray-50">
+    <main className="fixed inset-0 overflow-hidden bg-gray-50 font-sans">
       {/* 游戏 Canvas 面板 */}
       <canvas ref={canvasRef} className="block" />
       
-      {/* 悬浮 UI：标题 */}
+      {/* 标题 */}
       <div className="absolute top-4 left-4 pointer-events-none select-none">
-        <h1 className="text-xl font-bold text-gray-800 opacity-30">Circle War (WASD to Move)</h1>
+        <h1 className="text-xl font-bold text-gray-800 opacity-20">Circle War</h1>
       </div>
 
-      {/* 悬浮 UI：质量显示 (HUD) */}
+      {/* Debug 面板 (左下角) */}
+      <div 
+        ref={debugRef}
+        className="absolute bottom-4 left-4 pointer-events-none select-none text-[10px] font-mono text-gray-400 bg-white/30 p-2 rounded"
+      >
+        {/* 由 updateHUD 填充 */}
+      </div>
+
+      {/* 质量显示 (右下角) */}
       <div className="absolute bottom-4 right-4 pointer-events-none select-none text-right">
-        <div className="text-sm font-mono text-gray-500 bg-white/50 px-2 py-1 rounded shadow-sm">
-          Mass: {Math.floor(gameStateRef.current.player.radius)}
-        </div>
+        <span 
+          ref={massRef}
+          className="text-sm font-mono font-bold text-blue-600 bg-white/80 px-3 py-1 rounded-full shadow-lg border border-blue-100"
+        >
+          Mass: 30
+        </span>
       </div>
     </main>
   );
