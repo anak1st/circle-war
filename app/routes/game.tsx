@@ -15,7 +15,7 @@ export function meta({}: Route.MetaArgs) {
 const WORLD_SIZE = 5000;    // 游戏地图的总宽度和高度
 const FOOD_COUNT = 1000;    // 地图上同时存在的最大食物数量
 const FOOD_RADIUS = 5;      // 食物点的基础半径
-const INITIAL_AI_COUNT = 10; // 初始 AI 敌人数量
+const INITIAL_AI_COUNT = 20; // 初始 AI 敌人数量
 const COLORS = ["#ff4757", "#2ed573", "#1e90ff", "#ffa502", "#eccc68", "#70a1ff", "#7bed9f"]; // 随机颜色库
 
 /**
@@ -28,6 +28,8 @@ class Circle {
   radius: number;  // 圆形的半径（代表质量）
   color: string;   // 圆形的填充颜色
   name: string;    // 显示在圆形中心的名称
+  vx?: number;     // X 轴速度（用于 AI 移动）
+  vy?: number;     // Y 轴速度（用于 AI 移动）
 
   /**
    * @param x 初始 X 坐标
@@ -179,22 +181,20 @@ export default function Game() {
      * 负责处理移动、边界检查、碰撞检测等
      */
     const update = () => {
-      const { player, foods } = gameStateRef.current;
+      const { player, foods, ais } = gameStateRef.current;
       const keys = keysRef.current;
-      
-      // 1. 计算玩家移动速度：球体越重（半径越大），速度越慢
+
+      // --- 1. 玩家移动逻辑 ---
       const baseSpeed = 5;
       const speed = baseSpeed * Math.pow(30 / player.radius, 0.5);
 
       let dx = 0;
       let dy = 0;
-
       if (keys.w) dy -= speed;
       if (keys.s) dy += speed;
       if (keys.a) dx -= speed;
       if (keys.d) dx += speed;
 
-      // 2. 对角线移动速度归一化（防止斜向移动过快）
       if (dx !== 0 && dy !== 0) {
         const factor = 1 / Math.sqrt(2);
         dx *= factor;
@@ -203,28 +203,82 @@ export default function Game() {
 
       player.x += dx;
       player.y += dy;
-
-      // 3. 地图边界限制：防止玩家跑出红框
       player.x = Math.max(player.radius, Math.min(WORLD_SIZE - player.radius, player.x));
       player.y = Math.max(player.radius, Math.min(WORLD_SIZE - player.radius, player.y));
 
-      // 4. 碰撞检测：检查玩家是否碰到了食物
+      // --- 2. AI 移动与边界限制 ---
+      ais.forEach(ai => {
+        // 简单的随机游走逻辑（后续可优化为寻路或躲避）
+        if (!ai.vx || !ai.vy || Math.random() < 0.02) {
+          const angle = Math.random() * Math.PI * 2;
+          const aiSpeed = baseSpeed * 0.8 * Math.pow(30 / ai.radius, 0.5);
+          ai.vx = Math.cos(angle) * aiSpeed;
+          ai.vy = Math.sin(angle) * aiSpeed;
+        }
+        ai.x += ai.vx;
+        ai.y += ai.vy;
+
+        // 边界反弹
+        if (ai.x < ai.radius || ai.x > WORLD_SIZE - ai.radius) ai.vx *= -1;
+        if (ai.y < ai.radius || ai.y > WORLD_SIZE - ai.radius) ai.vy *= -1;
+        ai.x = Math.max(ai.radius, Math.min(WORLD_SIZE - ai.radius, ai.x));
+        ai.y = Math.max(ai.radius, Math.min(WORLD_SIZE - ai.radius, ai.y));
+      });
+
+      // --- 3. 碰撞检测：玩家吃食物 ---
       for (let i = foods.length - 1; i >= 0; i--) {
         const food = foods[i];
         const distSq = Math.pow(player.x - food.x, 2) + Math.pow(player.y - food.y, 2);
-        const minDist = player.radius + food.radius;
-
-        if (distSq < Math.pow(minDist, 2)) {
-          // 吞噬逻辑：按照面积增加的方式计算新半径
+        if (distSq < Math.pow(player.radius, 2)) {
           player.radius = Math.sqrt(Math.pow(player.radius, 2) + Math.pow(food.radius, 2));
           foods.splice(i, 1);
         }
       }
-      
-      // 5. 自动补全食物点
-      if (foods.length < FOOD_COUNT) {
-        spawnFood();
+
+      // --- 4. 碰撞检测：玩家与 AI 吞噬 ---
+      for (let i = ais.length - 1; i >= 0; i--) {
+        const ai = ais[i];
+        const distSq = Math.pow(player.x - ai.x, 2) + Math.pow(player.y - ai.y, 2);
+        const dist = Math.sqrt(distSq);
+
+        // 吞噬判定：半径大 10% 且覆盖了对方圆心的一定距离
+        if (dist < player.radius && player.radius > ai.radius * 1.1) {
+          // 玩家吃 AI
+          player.radius = Math.sqrt(Math.pow(player.radius, 2) + Math.pow(ai.radius, 2));
+          ais.splice(i, 1);
+        } else if (dist < ai.radius && ai.radius > player.radius * 1.1) {
+          // AI 吃玩家 (简单的死亡重置)
+          alert("Game Over! You were eaten.");
+          player.radius = 30;
+          player.x = WORLD_SIZE / 2;
+          player.y = WORLD_SIZE / 2;
+        }
       }
+
+      // --- 5. 碰撞检测：AI 之间吞噬 ---
+      for (let i = ais.length - 1; i >= 0; i--) {
+        for (let j = i - 1; j >= 0; j--) {
+          const a = ais[i];
+          const b = ais[j];
+          const distSq = Math.pow(a.x - b.x, 2) + Math.pow(a.y - b.y, 2);
+          const dist = Math.sqrt(distSq);
+
+          if (dist < a.radius && a.radius > b.radius * 1.1) {
+            a.radius = Math.sqrt(Math.pow(a.radius, 2) + Math.pow(b.radius, 2));
+            ais.splice(j, 1);
+            // 索引修正，因为 i 可能在 j 之后
+            if (i > j) i--;
+          } else if (dist < b.radius && b.radius > a.radius * 1.1) {
+            b.radius = Math.sqrt(Math.pow(b.radius, 2) + Math.pow(a.radius, 2));
+            ais.splice(i, 1);
+            break; // a 已被吃，跳出内层循环
+          }
+        }
+      }
+
+      // --- 6. 自动补全食物与 AI ---
+      if (foods.length < FOOD_COUNT) spawnFood();
+      if (ais.length < INITIAL_AI_COUNT) spawnAIs();
     };
 
     /**
